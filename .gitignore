@@ -1,0 +1,16 @@
+# Virtual environments
+venv/
+.env
+
+# Airflow stuff
+airflow/
+logs/
+__pycache__/
+
+# Data files
+data/*.gz
+data/*.csv
+
+# OS files
+.DS_Store
+*.log
