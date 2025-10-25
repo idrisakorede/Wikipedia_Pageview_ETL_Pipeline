@@ -53,7 +53,7 @@ The project supports **CoreSentiment**, a stock market prediction tool that leve
 5. **Analyze** → Query database for company with highest views
 6. **Cleanup** → Remove temporary files (optional)
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Prerequisites
 
@@ -138,7 +138,7 @@ wikipedia-pageview-pipeline/
 └── README.md                        # This file
 ```
 
-## ⚙️ Configuration
+## Configuration
 
 ### Environment Variables (.env)
 
@@ -237,7 +237,7 @@ GROUP BY company_name
 ORDER BY total_pageviews DESC;
 ```
 
-## 🔍 Analysis Queries
+## Analysis Queries
 
 ### Find Company with Highest Pageviews
 
