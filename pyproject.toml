@@ -1,0 +1,47 @@
+[project]
+name = "wikipedia-airflow-pipeline-project"
+version = "0.1.0"
+description = "Apache Airflow pipeline for analyzing Wikipedia pageviews of tech companies"
+authors = [
+    {name = "Idris Akorede Ibrahim", email = "idrisakoredeibrahim@gmail.com"}
+]
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "apache-airflow==3.1.0",
+    "beautifulsoup4==4.14.3",
+    "pandas==2.3.3",
+    "psycopg2-binary==2.9.11",
+    "requests==2.32.5",
+    "tqdm==4.67.1",
+    "python-dotenv==1.1.1",
+    "lxml==6.0.2",
+    "numpy==2.3.4",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==8.3.3",
+    "pytest-cov=5.0.0",
+    "black==24.8.0",
+    "ruff==0.6.9",
+    "pre-commit==3.8.0"
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.black]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
