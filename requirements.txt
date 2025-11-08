@@ -1,0 +1,24 @@
+# --- Airflow Core + Providers ---
+apache-airflow==3.1.1
+apache-airflow-providers-postgres==6.3.0
+apache-airflow-providers-common-sql==1.28.1
+apache-airflow-providers-telegram==4.8.2
+apache-airflow-providers-slack==9.4.0
+apache-airflow-providers-openai==1.6.3
+airflow-ai-sdk[openai]
+
+# --- Core Utilities & Data ---
+pandas==2.3.3
+numpy==2.3.4
+requests==2.32.5
+beautifulsoup4==4.14.2
+lxml==6.0.2
+tqdm==4.67.1
+python-dotenv==1.1.1
+
+# --- Config & Validation ---
+pydantic==2.12.3
+pydantic-settings==2.11.0
+
+# --- Database Driver ---
+psycopg2-binary==2.9.11

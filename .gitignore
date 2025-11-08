@@ -1,0 +1,40 @@
+# === Python ===
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+
+# === Environment ===
+.env
+.env.*
+.venv/
+venv/
+*.env
+
+# === Airflow ===
+logs/
+plugins/__pycache__/
+dags/__pycache__/
+config/
+airflow.cfg
+unittests.cfg
+
+# === Docker ===
+*.pid
+*.db
+*.tar
+.airflow/
+
+# === OS & IDE ===
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# === Data & temp files ===
+data/
+tmp/
+*.csv
+*.json
+*.log
