@@ -40,7 +40,8 @@ x-airflow-common:
 
     # Ollama AI Configuration
     AIRFLOW__AI__PROVIDER: ollama
-    AIRFLOW__AI__OLLAMA__BASE_URL: http://ollama:11434
+    AIRFLOW__AI__OLLAMA__BASE_URL: http://ollama:11434       # Airflow config
+    OLLAMA_BASE_URL: http://ollama:11434                    # Fix for pydantic_ai library
     AIRFLOW__AI__OLLAMA__MODEL: llama3.2:1b
     
   

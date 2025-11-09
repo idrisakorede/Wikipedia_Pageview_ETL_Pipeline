@@ -124,10 +124,10 @@ def pageviews():
         """Airflow Task: Pre-filter pageview data for company-related pages."""
         return prefilter_data(csv_file)
 
-    # Task 5: Filter data using LLM
+    # Task 5: Filter data using LLM with Ollama
     @task.llm(
-        model="gpt-4o-mini",
-        output_type=dict,
+        model="ollama:llama3.2:1b",
+        result_type=dict,
         max_active_tis_per_dagrun=1,
         system_prompt=SYSTEM_PROMPT,
     )
