@@ -6,6 +6,7 @@ apache-airflow-providers-telegram==4.8.2
 apache-airflow-providers-slack==9.4.0
 apache-airflow-providers-openai==1.6.3
 airflow-ai-sdk[openai]
+airflow-ai-sdk[ollama]
 
 # --- Core Utilities & Data ---
 pandas==2.3.3
