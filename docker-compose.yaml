@@ -37,7 +37,12 @@ x-airflow-common:
     DB_NAME: ${DB_NAME}
     DB_USER: ${DB_USER}
     DB_PASSWORD: ${DB_PASSWORD}
-    OPENAI_API_KEY: ${OPENAI_API_KEY}
+
+    # Ollama AI Configuration
+    AIRFLOW__AI__PROVIDER: ollama
+    AIRFLOW__AI__OLLAMA__BASE_URL: http://ollama:11434
+    AIRFLOW__AI__OLLAMA__MODEL: llama3.2:1b
+    
   
   volumes:
     - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
@@ -91,7 +96,6 @@ services:
 
   ollama:
     image: ollama/ollama:latest
-    container_name: ollama
     ports:
       - "11434:11434"
     volumes:
@@ -117,7 +121,6 @@ services:
 
   ollama-init:
     image: ollama/ollama:latest
-    container: ollama-init
     networks:
       - airflow
     depends_on:
@@ -129,11 +132,10 @@ services:
       - |
         echo "Waiting for ollama to be ready"
         sleep 5
-        echo "Pulling llama3.1 model..."
-        ollama pull llama3.1 --host http://ollama:11434
+        echo "Pulling llama3.2:1b model..."
+        ollama pull llama3.2:1b --host http://ollama:11434
         echo "Model pulled successfully!"
-    restart: "no"
-        
+    restart: "no"    
 
   redis:
     # Redis is limited to 7.2-bookworm due to licencing change
@@ -180,11 +182,6 @@ services:
       <<: *airflow-common-depends-on
       airflow-init:
         condition: service_completed_successfully
-    environment:
-      <<: *airflow-common-env
-      AIRFLOW__AI__PROVIDER: ollama
-      AIRFLOW__AI__OLLAMA__BASE_URL: http://ollama:11434
-      AIRFLOW__AI__OLLAMA__MODEL: llama3.1
 
   airflow-dag-processor:
     <<: *airflow-common
@@ -218,9 +215,6 @@ services:
       # Required to handle warm shutdown of the celery workers properly
       # See https://airflow.apache.org/docs/docker-stack/entrypoint.html#signal-propagation
       DUMB_INIT_SETSID: "0"
-      AIRFLOW__AI__PROVIDER: ollama
-      AIRFLOW__AI__OLLAMA__BASE_URL: http://ollama:11434
-      AIRFLOW__AI__OLLAMA__MODEL: llama3.1
     restart: always
     depends_on:
       <<: *airflow-common-depends-on
@@ -243,11 +237,6 @@ services:
       <<: *airflow-common-depends-on
       airflow-init:
         condition: service_completed_successfully
-    environment:
-      <<: *airflow-common-env
-      AIRFLOW__AI__PROVIDER: ollama
-      AIRFLOW__AI__OLLAMA__BASE_URL: http://ollama:11434
-      AIRFLOW__AI__OLLAMA__MODEL: llama3.1
 
   airflow-init:
     <<: *airflow-common
