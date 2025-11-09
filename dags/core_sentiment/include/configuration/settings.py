@@ -12,7 +12,6 @@ class Settings(BaseSettings):
     DB_NAME: str
     DB_USER: str
     DB_PASSWORD: str
-    OPENAI_API_KEY: str
 
     # Configuration for how environment variables are loaded and handled
     model_config = SettingsConfigDict(
