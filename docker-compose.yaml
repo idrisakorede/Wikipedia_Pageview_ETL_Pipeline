@@ -91,6 +91,7 @@ services:
 
   ollama:
     image: ollama/ollama:latest
+    container_name: ollama
     ports:
       - "11434:11434"
     volumes:
@@ -98,6 +99,8 @@ services:
     restart: always
     networks:
       - airflow
+    # Only enable GPU if you have NVIDIA GPU + nvidia-docker
+    # Comment out the deploy section if you don't have GPU
     deploy:
       resources:
         reservations:
@@ -105,6 +108,32 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  ollama-init:
+    image: ollama/ollama:latest
+    container: ollama-init
+    networks:
+      - airflow
+    depends_on:
+      ollama:
+        condition: service_healthy
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        echo "Waiting for ollama to be ready"
+        sleep 5
+        echo "Pulling llama3.1 model..."
+        ollama pull llama3.1 --host http://ollama:11434
+        echo "Model pulled successfully!"
+    restart: "no"
+        
 
   redis:
     # Redis is limited to 7.2-bookworm due to licencing change
