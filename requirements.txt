@@ -5,8 +5,12 @@ apache-airflow-providers-common-sql==1.28.1
 apache-airflow-providers-telegram==4.8.2
 apache-airflow-providers-slack==9.4.0
 apache-airflow-providers-openai==1.6.3
-airflow-ai-sdk[openai]
-airflow-ai-sdk[ollama]
+
+# --- AI/LLM SDKs ---
+airflow-ai-sdk[openai]==0.1.0
+airflow-ai-sdk[ollama]==0.1.0
+pydantic-ai>=0.0.14
+pydantic-ai[openai]  
 
 # --- Core Utilities & Data ---
 pandas==2.3.3
