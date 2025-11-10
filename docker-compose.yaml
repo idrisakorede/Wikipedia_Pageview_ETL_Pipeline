@@ -5,9 +5,7 @@ x-airflow-common:
   # Comment the image line, place your Dockerfile in the directory where you placed the docker-compose.yaml
   # and uncomment the "build" line below, Then run `docker-compose build` to build the images.
   image: ${AIRFLOW_IMAGE_NAME:-apache/airflow:3.1.0}
-  build:
-    context: .
-    dockerfile: Dockerfile
+  build: .
   environment:
     &airflow-common-env
     AIRFLOW__CORE__EXECUTOR: CeleryExecutor
@@ -40,11 +38,10 @@ x-airflow-common:
 
     # Ollama AI Configuration
     AIRFLOW__AI__PROVIDER: ollama
-    AIRFLOW__AI__OLLAMA__BASE_URL: http://ollama:11434       # Airflow config
-    OLLAMA_BASE_URL: http://ollama:11434                    # Fix for pydantic_ai library
-    AIRFLOW__AI__OLLAMA__MODEL: llama3.2:1b
+    AIRFLOW__AI__OLLAMA__BASE_URL: http://ollama:11434/v1       # Airflow config
+    OLLAMA_BASE_URL: http://ollama:11434/v1                    # Fix for PydanticAI compatibility
+    AIRFLOW__AI__OLLAMA__MODEL: ollama:llama3.2:1b
     
-  
   volumes:
     - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
     - ${AIRFLOW_PROJ_DIR:-.}/logs:/opt/airflow/logs
@@ -102,17 +99,17 @@ services:
     volumes:
       - ollama_data:/root/.ollama
     restart: always
-    networks:
-      - airflow
+    environment:
+      OLLAMA_NUM_GPU: 0
     # Only enable GPU if you have NVIDIA GPU + nvidia-docker
     # Comment out the deploy section if you don't have GPU
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
     healthcheck:
       test: ["CMD-SHELL", "ollama list || exit 1"]
       interval: 30s
@@ -122,20 +119,21 @@ services:
 
   ollama-init:
     image: ollama/ollama:latest
-    networks:
-      - airflow
     depends_on:
       ollama:
         condition: service_healthy
+    environment:
+      OLLAMA_HOST: http://ollama:11434
     entrypoint: /bin/bash
     command:
       - -c
       - |
         echo "Waiting for ollama to be ready"
         sleep 5
-        echo "Pulling llama3.2:1b model..."
-        ollama pull llama3.2:1b --host http://ollama:11434
+        echo "Pulling llama3.2:3b model..."
+        ollama pull llama3.2:3b
         echo "Model pulled successfully!"
+        ollama list
     restart: "no"    
 
   redis:

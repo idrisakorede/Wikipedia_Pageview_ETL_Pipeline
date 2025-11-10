@@ -9,7 +9,7 @@ from core_sentiment.include.src_python.download_data import download_random_wiki
 from core_sentiment.include.src_python.extract_data import extract_data
 from core_sentiment.include.src_python.pageviews_filtering_prompt import SYSTEM_PROMPT
 from core_sentiment.include.src_python.prefilter_data import prefilter_data
-from pendulum import datetime
+from pendulum import datetime, now
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +101,7 @@ def pageviews():
         task_id="create_pageviews_table",
         sql="create_pageviews_table.sql",
         conn_id="core_sentiment_db",
+        queue="default",
         doc_md="Create database schema and tables if they don't exist",
     )
 
@@ -127,6 +128,7 @@ def pageviews():
     # Task 5: Filter data using LLM with Ollama
     @task.llm(
         model="ollama:llama3.2:1b",
+        queue="default",
         result_type=dict,
         max_active_tis_per_dagrun=1,
         system_prompt=SYSTEM_PROMPT,
@@ -193,7 +195,7 @@ def pageviews():
             logger.info(f"Processed directory: {processed_dir}")
 
             # Generate timestamp for unique filenames
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            timestamp = now("UTC").strftime("%Y%m%d_%H%M%S")
 
             json_path = processed_dir / f"filtered_{timestamp}.json"
             csv_path = processed_dir / f"filtered_{timestamp}.csv"
@@ -265,14 +267,8 @@ def pageviews():
     filter_task = filter_pageview_data(prefilter_task)
     save_task = save_filtered_pageview_data(filter_task)
 
-    (
-        create_pageviews_table_task
-        >> download_task
-        >> extract_task
-        >> prefilter_task
-        >> filter_task
-        >> save_task
-    )
+    create_pageviews_table_task
+    download_task >> extract_task >> prefilter_task >> filter_task >> save_task
 
 
 pageviews()
