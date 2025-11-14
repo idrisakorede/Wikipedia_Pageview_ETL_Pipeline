@@ -41,6 +41,10 @@ x-airflow-common:
     AIRFLOW__AI__OLLAMA__BASE_URL: http://ollama:11434/v1       # Airflow config
     OLLAMA_BASE_URL: http://ollama:11434/v1                    # Fix for PydanticAI compatibility
     AIRFLOW__AI__OLLAMA__MODEL: ollama:llama3.2:1b
+
+    OLLAMA_HOST: ${OLLAMA_HOST}
+    OLLAMA_MODEL: ${OLLAMA_MODEL}
+    OLLAMA_TIMEOUT: ${OLLAMA_TIMEOUT}
     
   volumes:
     - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
@@ -94,11 +98,14 @@ services:
 
   ollama:
     image: ollama/ollama:latest
+    container_name: ollama
     ports:
       - "11434:11434"
     volumes:
       - ollama_data:/root/.ollama
-    restart: always
+    restart: unless-stopped
+    networks:
+      - default
     environment:
       OLLAMA_NUM_GPU: 0
     # Only enable GPU if you have NVIDIA GPU + nvidia-docker

@@ -1,15 +1,18 @@
 import logging
 from datetime import timedelta
-from pathlib import Path
 
 from airflow.providers.common.sql.operators.sql import SQLExecuteQueryOperator
 from airflow.sdk import dag, task
-from core_sentiment.include.configuration.settings import config
-from core_sentiment.include.src_python.download_data import download_random_wiki_file
-from core_sentiment.include.src_python.extract_data import extract_data
-from core_sentiment.include.src_python.pageviews_filtering_prompt import SYSTEM_PROMPT
-from core_sentiment.include.src_python.prefilter_data import prefilter_data
-from pendulum import datetime, now
+from core_sentiment.include.app.tasks.download_data import download_random_wiki_file
+from core_sentiment.include.app.tasks.extract_data import extract_data
+from core_sentiment.include.app.tasks.file_operations import save_filtered_output
+from core_sentiment.include.app.tasks.llm_filtering import (
+    call_ollama_api,
+    process_batches,
+)
+from core_sentiment.include.app.tasks.prefilter_data import prefilter_data
+from core_sentiment.include.app.utils.pageviews_filtering_prompt import SYSTEM_PROMPT
+from pendulum import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +61,7 @@ default_args = {
     schedule="@daily",
     start_date=datetime(2025, 10, 20),
     catchup=False,
-    template_searchpath="/opt/airflow/dags/core_sentiment/include/src_sql",
+    template_searchpath="/opt/airflow/dags/core_sentiment/include/sql/ddl",
     max_active_runs=1,
     tags=[
         "wikipedia",
@@ -122,136 +125,29 @@ def pageviews():
     # Task 4: Pre-filter before LLM processing
     @task
     def prefilter_pageview_data(csv_file):
-        """Airflow Task: Pre-filter pageview data for company-related pages."""
+        """Airflow Task: Pre-filter pageview data."""
         return prefilter_data(csv_file)
 
-    # Task 5: Filter data using LLM with Ollama
-    @task.llm(
-        model="ollama:llama3.2:1b",
-        queue="default",
-        result_type=dict,
-        max_active_tis_per_dagrun=1,
-        system_prompt=SYSTEM_PROMPT,
-    )
-    def filter_pageview_data(prefiltered_csv_file):
-        """
-        Airflow Task:
-            - LLM Task: Filter Wikipedia pageview data to keep only genuine product/service pages.
-            - This receives a pre-filtered dataset to avoid memory issues.
-
-        Argument:
-            - prefiltered_csv_file (str): Path to the pre-filtered CSV file
-
-        Return:
-            dict: {
-                "json_output": <list of dict>,
-                "csv_output": <csv-formatted string>
-            }
-        """
-        import pandas as pd
-
-        try:
-            # Read the CSV file
-            logger.info(f"Reading pre-filtered CSV file: {prefiltered_csv_file}")
-            df = pd.read_csv(prefiltered_csv_file)
-
-            # Convert to list of dictionaries for LLM processing
-            records = df.to_dict("records")
-            logger.info(f"Loaded {len(records)} records to LLM for filtering")
-
-            # The LLM will process these records using the SYSTEM_PROMPT logic
-            # and return filtered results in both JSON and CSV formats
-            return {
-                "json_output": records,  # LLM will filter and return relevant records
-                "csv_output": df.to_csv(
-                    index=False
-                ),  # LLM will filter and return as CSV
-            }
-
-        except Exception as e:
-            logger.error(f"Error reading CSV file {prefiltered_csv_file}: {e}")
-            raise
-
-    # Task 6: Save filtered output
+    # Task 5: LLM Filter (Sequential Batches)
     @task
-    def save_filtered_pageview_data(filtered_result):
-        """
-        Airflow Task:
-            - Saves JSON and CSV outputs to local disk instead of storing large data in XCom.
+    def filter_pageview_data(prefiltered_csv_file):
+        """Process data through LLM in sequential batches."""
 
-        Argument:
-            - filtered_result (dict): The result of the LLM task
+        # Create wrapper function that includes system prompt
+        def batch_processor(batch_records):
+            return call_ollama_api(batch_records, SYSTEM_PROMPT)
 
-        Return:
-            - Metadata only.
-        """
+        return process_batches(
+            prefiltered_csv_file=prefiltered_csv_file,
+            batch_processor_func=batch_processor,
+            batch_size=50,
+        )
 
-        import json
-
-        try:
-            # Ensure processed directory exists
-            processed_dir = Path(config.PROCESSED_PAGEVIEWS_DIR)
-            processed_dir.mkdir(parents=True, exist_ok=True)
-            logger.info(f"Processed directory: {processed_dir}")
-
-            # Generate timestamp for unique filenames
-            timestamp = now("UTC").strftime("%Y%m%d_%H%M%S")
-
-            json_path = processed_dir / f"filtered_{timestamp}.json"
-            csv_path = processed_dir / f"filtered_{timestamp}.csv"
-
-            # Validate filtered_result structure
-            if not isinstance(filtered_result, dict):
-                raise ValueError(f"Expected dict, got {type(filtered_result)}")
-
-            json_output = filtered_result.get("json_output", [])
-            csv_output = filtered_result.get("csv_output", "")
-
-            # Write to JSON
-            logger.info(f"Writing JSON output to: {json_path}")
-            with open(json_path, "w", encoding="utf-8") as json_file:
-                json.dump(json_output, json_file, indent=2, ensure_ascii=False)
-
-            # Verify JSON file was created
-            if not json_path.exists():
-                raise IOError(f"Failed to create JSON file: {json_path}")
-            logger.info(
-                f"JSON file created successfully: {json_path.stat().st_size} bytes"
-            )
-
-            # Write to CSV
-            logger.info(f"Writing CSV output to: {csv_path}")
-            with open(csv_path, "w", encoding="utf-8") as csv_file:
-                csv_file.write(csv_output)
-
-            # Verify CSV file was created
-            if not csv_path.exists():
-                raise IOError(f"Failed to create CSV file: {csv_path}")
-            logger.info(
-                f"CSV file created successfully: {csv_path.stat().st_size} bytes"
-            )
-
-            result = {
-                "json_file": str(json_path),
-                "csv_file": str(csv_path),
-                "json_records_count": len(json_output),
-                "status": "success",
-            }
-
-            logger.info(f"Filtered output saved successfully: {result}")
-            return result
-
-        except (IOError, OSError) as e:
-            logger.error(f"File I/O error while saving filtered output: {e}")
-            raise
-
-        except ValueError as e:
-            logger.error(f"Invalid data format: {e}")
-            raise
-
-        except Exception as e:
-            logger.error(f"Unexpected error while saving filtered output: {e}")
-            raise
+    # Task 6: Save
+    @task
+    def save_filtered_data(filtered_result):
+        """Airflow Task: Save filtered data to disk."""
+        return save_filtered_output(filtered_result)
 
     # # Task 4: Load to Database
     # load_task = PythonOperator(
@@ -260,13 +156,14 @@ def pageviews():
     #     doc_md="Load extracted data into PostgreSQL database",
     # )
 
-    # Define tasks
+    # Define workflow
     download_task = download_pageview_data()
     extract_task = extract_pageview_data(download_task)
     prefilter_task = prefilter_pageview_data(extract_task)
     filter_task = filter_pageview_data(prefilter_task)
-    save_task = save_filtered_pageview_data(filter_task)
+    save_task = save_filtered_data(filter_task)
 
+    # Set dependencies
     create_pageviews_table_task
     download_task >> extract_task >> prefilter_task >> filter_task >> save_task
 

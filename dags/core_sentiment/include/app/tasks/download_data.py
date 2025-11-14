@@ -9,7 +9,7 @@ from pathlib import Path
 
 import requests
 from bs4 import BeautifulSoup
-from core_sentiment.include.configuration.settings import config
+from core_sentiment.include.app_config.settings import config
 from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
