@@ -137,8 +137,8 @@ services:
       - |
         echo "Waiting for ollama to be ready"
         sleep 5
-        echo "Pulling llama3.2:3b model..."
-        ollama pull llama3.2:3b
+        echo "Pulling llama3.2:1b model..."
+        ollama pull llama3.2:1b
         echo "Model pulled successfully!"
         ollama list
     restart: "no"    

@@ -2,15 +2,21 @@ import logging
 from datetime import timedelta
 
 from airflow.providers.common.sql.operators.sql import SQLExecuteQueryOperator
-from airflow.sdk import dag, task
+from airflow.sdk import TaskGroup, dag, task
+from core_sentiment.include.app.tasks.cleanup import cleanup_temp_files
+
+# Import business logic functions
 from core_sentiment.include.app.tasks.download_data import download_random_wiki_file
 from core_sentiment.include.app.tasks.extract_data import extract_data
-from core_sentiment.include.app.tasks.file_operations import save_filtered_output
-from core_sentiment.include.app.tasks.llm_filtering import (
-    call_ollama_api,
-    process_batches,
+from core_sentiment.include.app.tasks.llm_filter import process_with_llm
+from core_sentiment.include.app.tasks.load_filtered_data import (
+    load_filtered_pageviews_to_db,
 )
-from core_sentiment.include.app.tasks.prefilter_data import prefilter_data
+from core_sentiment.include.app.tasks.load_raw_data import (
+    load_raw_pageviews_to_db,
+    verify_load,
+)
+from core_sentiment.include.app.tasks.prefilter_data import prefilter_from_db
 from core_sentiment.include.app.utils.pageviews_filtering_prompt import SYSTEM_PROMPT
 from pendulum import datetime
 
@@ -49,7 +55,7 @@ default_args = {
     "owner": "dki",
     "depends_on_past": False,
     "retries": 3,
-    "retry_delay": timedelta(minutes=5),
+    "retry_delay": timedelta(minutes=1),
     "execution_timeout": timedelta(hours=2),
 }
 
@@ -60,8 +66,7 @@ default_args = {
     description="ETL pipeline to analyze Wikipedia pageviews for tech companies",
     schedule="@daily",
     start_date=datetime(2025, 10, 20),
-    catchup=False,
-    template_searchpath="/opt/airflow/dags/core_sentiment/include/sql/ddl",
+    template_searchpath="/opt/airflow/dags/core_sentiment/include/sql/",
     max_active_runs=1,
     tags=[
         "wikipedia",
@@ -77,95 +82,197 @@ default_args = {
 
     ## Purpose
     Extracts Wikipedia pageview data for major tech companies and analyzes trends.
+    Follows proper ELT pattern: Extract → Load Raw → Transform → Load Filtered → Analyze
 
     ## Companies Tracked
     - Amazon
     - Apple
     - Facebook (Meta)
-    - Google
+    - Google (Alphabet)
     - Microsoft
 
     ## Pipeline Steps
-    1. **Initialize Database**: Create schema if needed
+    1. **Initialize Database**: Create schema and tables
     2. **Download**: Fetch hourly Wikipedia pageview dump
-    3. **Extract**: Unzip the gzip pageviews file and extract data into a json and csv files
-    4. **Filter**: Filter company data
-    4. **Load**: Store data in PostgreSQL
-    5. **Analyze**: Determine company with highest views
-    6. **Cleanup**: Remove temporary files
+    3. **Extract**: Unzip the gzip pageviews file and extract all data
+    4. **Load Raw Data**: Store ALL raw pageviews in database (data warehouse)
+    5. **Pre-filter**: Create subset for LLM processing
+    6. **LLM Filter**: Use Ollama to filter genuine product/service pages
+    7. **Load Filtered Data**: Store filtered results in database
+    8. **Analyze**: Determine company with highest pageviews
+    9. **Cleanup**: Remove temporary files
 
     ## Output
-    Database table `company_pageviews` with aggregated view counts.
+    Database Tables
+    - `raw_pageviews`: All extracted pageviews (immutable, historical record)
+    - `filtered_pageviews`: LLM-filtered product/service pages only
+    - `company_pageview_summary`: Daily aggregated pageviews by company
     """,
 )
 def pageviews():
-    # Task 1: Initialize Database (Creates table if not exists)
-    create_pageviews_table_task = SQLExecuteQueryOperator(
-        task_id="create_pageviews_table",
-        sql="create_pageviews_table.sql",
-        conn_id="core_sentiment_db",
-        queue="default",
-        doc_md="Create database schema and tables if they don't exist",
-    )
-
-    # Task 2: Download Data
-    @task
-    def download_pageview_data():
-        """Airflow Task: Download Wikipedia pageview data file."""
-
-        return download_random_wiki_file()
-
-    # Task 3: Unzip and Extract Company Data
-    @task
-    def extract_pageview_data(zipped_file):
-        """Airflow Task: Extract company-specific pageview data."""
-
-        return extract_data(zipped_file)
-
-    # Task 4: Pre-filter before LLM processing
-    @task
-    def prefilter_pageview_data(csv_file):
-        """Airflow Task: Pre-filter pageview data."""
-        return prefilter_data(csv_file)
-
-    # Task 5: LLM Filter (Sequential Batches)
-    @task
-    def filter_pageview_data(prefiltered_csv_file):
-        """Process data through LLM in sequential batches."""
-
-        # Create wrapper function that includes system prompt
-        def batch_processor(batch_records):
-            return call_ollama_api(batch_records, SYSTEM_PROMPT)
-
-        return process_batches(
-            prefiltered_csv_file=prefiltered_csv_file,
-            batch_processor_func=batch_processor,
-            batch_size=50,
+    # ========================================================
+    # ============== DATABASE INITIALIZATION =================
+    # ========================================================
+    with TaskGroup("database_setup", tooltip="Initialize database schema") as db_setup:
+        create_raw_tables = SQLExecuteQueryOperator(
+            task_id="create_raw_tables",
+            sql="ddl/tables.sql",
+            conn_id="core_sentiment_db",
         )
 
-    # Task 6: Save
+        create_classifier_function = SQLExecuteQueryOperator(
+            task_id="create_classifier_function",
+            sql="ddl/company_classifier_function.sql",
+            conn_id="core_sentiment_db",
+        )
+
+        create_overrides_table = SQLExecuteQueryOperator(
+            task_id="create_overrides_table",
+            sql="ddl/company_overrides_table.sql",
+            conn_id="core_sentiment_db",
+        )
+
+        create_classified_view = SQLExecuteQueryOperator(
+            task_id="create_classified_view",
+            sql="ddl/classified_pageviews_view.sql",
+            conn_id="core_sentiment_db",
+        )
+
+        # Schema creation order
+        (
+            create_raw_tables
+            >> create_classifier_function
+            >> create_overrides_table
+            >> create_classified_view
+        )  # type: ignore[unused-expression]
+
+    # ================================================================================
+    # ==================== EXTRACT & LOAD RAW TO WAREHOUSE PHASE =====================
+    # ================================================================================
+
+    with TaskGroup(
+        "extract_load_raw", tooltip="Extract data and load to warehouse"
+    ) as extract_load:
+
+        @task
+        def download_data():
+            """Download Wikipedia pageview dump"""
+            return download_random_wiki_file()
+
+        @task
+        def extract_all_data(zipped_file: str):
+            """Extract all pageview data from archive"""
+            return extract_data(zipped_file)
+
+        @task
+        def load_raw_to_warehouse(extract_info: dict):
+            """Load ALL raw data to warehouse"""
+            # Load data
+            result = load_raw_pageviews_to_db(extract_info)
+
+            # Verify data
+            verification = verify_load(result["source_file"])
+
+            # Combine results
+            return {**result, "verification": verification}
+
+        download_task = download_data()
+        extract_task = extract_all_data(download_task)  # type: ignore[arg-type]
+        load_raw_task = load_raw_to_warehouse(extract_task)  # type: ignore[arg-type]
+
+        download_task >> extract_task >> load_raw_task  # type: ignore[unused-expression]
+
+    # ========================================================
+    # =================== TRANSFORM PHASE ====================
+    # ========================================================
+
+    with TaskGroup(
+        "transform_llm", tooltip="Pre-filter and LLM filtering"
+    ) as transform:
+
+        @task
+        def prefilter_data():
+            """Pre-filter data from warehouse for LLM processing"""
+            return prefilter_from_db()
+
+        @task
+        def llm_filter_products(csv_file: str):
+            """
+            LLM-powered filtering to identify genuine product/service pages.
+
+            Business Logic:
+                - Uses direct Ollama API calls (bypasses @task.llm decorator)
+                - Processes data in batches for efficiency
+                - Filters to keep only legitimate company products/services
+                - Removes people, places, events, legal cases
+            """
+            return process_with_llm(
+                prefiltered_csv_file=csv_file,
+                system_prompt=SYSTEM_PROMPT,
+                batch_size=50,
+            )
+
+        prefilter_task = prefilter_data()
+        filter_task = llm_filter_products(prefilter_task)  # type: ignore[arg-type]
+
+        prefilter_task >> filter_task  # type: ignore[unused-expression]
+
+    # ========================================================
+    # ============ LOAD FILTERED & ANALYTICS =================
+    # ========================================================
+
+    with TaskGroup(
+        "load_analytics", tooltip="Load filtered data and run analytics"
+    ) as analytics:
+
+        @task
+        def load_filtered_data(filtered_result: dict):
+            """Load LLM-filtered data to curated layer"""
+            return load_filtered_pageviews_to_db(filtered_result)
+
+        load_filtered_task = load_filtered_data(filter_task)  # type: ignore[arg-type]
+
+        # Refresh materialized view
+        refresh_view = SQLExecuteQueryOperator(
+            task_id="refresh_classified_view",
+            sql="SELECT refresh_classified_pageviews();",
+            conn_id="core_sentiment_db",
+        )
+
+        # Get company rankings
+        get_rankings = SQLExecuteQueryOperator(
+            task_id="get_company_rankings",
+            sql="queries/company_rankings.sql",
+            conn_id="core_sentiment_db",
+            do_xcom_push=True,
+        )
+
+        # Get winner
+        get_winner = SQLExecuteQueryOperator(
+            task_id="get_biggest_company",
+            sql="queries/biggest_company.sql",
+            conn_id="core_sentiment_db",
+            do_xcom_push=True,
+        )
+
+        load_filtered_task >> refresh_view >> [get_rankings, get_winner]  # type: ignore[unused-expression]
+
+    # ========================================================
+    # ====================== CLEAN UP ========================
+    # ========================================================
+
     @task
-    def save_filtered_data(filtered_result):
-        """Airflow Task: Save filtered data to disk."""
-        return save_filtered_output(filtered_result)
+    def cleanup_temp(csv_path: str):
+        """Airflow Task: Remove temporary files after successful processing."""
+        return cleanup_temp_files(csv_path)
 
-    # # Task 4: Load to Database
-    # load_task = PythonOperator(
-    #     task_id="load_to_database",
-    #     python_callable=load_data_to_database,
-    #     doc_md="Load extracted data into PostgreSQL database",
-    # )
+    cleanup_task = cleanup_temp(prefilter_task)  # type: ignore[arg-type]
 
-    # Define workflow
-    download_task = download_pageview_data()
-    extract_task = extract_pageview_data(download_task)
-    prefilter_task = prefilter_pageview_data(extract_task)
-    filter_task = filter_pageview_data(prefilter_task)
-    save_task = save_filtered_data(filter_task)
+    # ========================================================
+    # ================ PIPELINE FLOW (ETL) ===================
+    # ========================================================
 
-    # Set dependencies
-    create_pageviews_table_task
-    download_task >> extract_task >> prefilter_task >> filter_task >> save_task
+    db_setup >> extract_load >> transform >> analytics >> cleanup_task  # type: ignore[unused-expression]
 
 
 pageviews()

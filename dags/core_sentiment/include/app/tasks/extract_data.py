@@ -1,8 +1,9 @@
-# extract_data.py
 import gzip
 import logging
+from pathlib import Path
 
 import pandas as pd
+from core_sentiment.include.app_config.settings import config
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,11 @@ def extract_company_data(
     Raise:
         - ExtractionError if extraction fails
     """
+
+    # Prepare the destination
+    raw_dir = Path(config.RAW_PAGEVIEWS_DIR)
+    output_path = raw_dir / Path(output_file).name
+
     logger.info(f"Reading and filtering gzip file in chunks: {zipped_file}")
 
     # Validate the gzip file
@@ -63,11 +69,14 @@ def extract_company_data(
             # Combine all chunks into a DataFrame
             result = pd.concat(all_pageviews, ignore_index=True)
 
-            # Save combined data into a CSV
-            result.to_csv(output_file, index=False)
+            # Rename columns to match database schema
+            result = result.rename(columns={"domain_code": "domain"})
 
-            logger.info(f"Extraction completed successfully. Saved to {output_file}")
-            return output_file
+            # Save combined data into a CSV
+            result.to_csv(output_path, index=False)
+
+            logger.info(f"Extraction completed successfully. Saved to {output_path}")
+            return str(output_path)
         else:
             logger.warning("No data found in the gzip file.")
             return ""
@@ -89,13 +98,17 @@ def validate_extraction_output(csv_path: str) -> bool:
         - True if the CSV file is valid.
         - False if validation fails.
     """
-
     try:
         df = pd.read_csv(csv_path)
 
-        # Check if the required columns exist
-        required_columns = ["domain_code", "page_title", "count_views"]
-        if not all(column in df.columns for column in required_columns):
+        # Check if the required columns exist (either old or new names)
+        required_columns_old = ["domain_code", "page_title", "count_views"]
+        required_columns_new = ["domain", "page_title", "count_views"]
+
+        has_old_columns = all(col in df.columns for col in required_columns_old)
+        has_new_columns = all(col in df.columns for col in required_columns_new)
+
+        if not (has_old_columns or has_new_columns):
             logger.error(f"Missing required columns. Found: {df.columns.to_list()}")
             return False
 
@@ -117,7 +130,7 @@ def validate_extraction_output(csv_path: str) -> bool:
         return False
 
 
-def extract_data(zipped_file: str) -> str:
+def extract_data(zipped_file: str) -> dict:
     """
     Function:
         - Wrapper function that coordinates the extraction and validation steps.
@@ -127,15 +140,19 @@ def extract_data(zipped_file: str) -> str:
         - zipped_file: Path to the gzip-compressed Wikipedia pageview file.
 
     Return:
-        - Path to the validated CSV file if successful.
+        - Dictionary with:
+            - csv_path: Path to the validated CSV file
+            - source_file: Original gzip filename
+            - record_count: Number of records extracted (optional)
 
     Raise:
         - ExtractionError if extraction or validation fails.
-
     """
-
     try:
         logger.info("Starting extraction process...")
+
+        # Extract source filename from path
+        source_file = Path(zipped_file).name
 
         # Extract data
         csv_file = extract_company_data(zipped_file)
@@ -145,7 +162,9 @@ def extract_data(zipped_file: str) -> str:
             raise ExtractionError("Extraction validation failed.")
 
         logger.info("Extraction completed and validated successfully.")
-        return csv_file
+
+        # Return dict with metadata
+        return {"csv_path": csv_file, "source_file": source_file, "status": "success"}
 
     except ExtractionError as e:
         logger.error(f"Extraction failed: {e}")
