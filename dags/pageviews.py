@@ -16,39 +16,15 @@ from core_sentiment.include.app.tasks.load_raw_data import (
     load_raw_pageviews_to_db,
     verify_load,
 )
+from core_sentiment.include.app.tasks.monitor import (
+    send_pipeline_failure,
+    send_pipeline_success,
+)
 from core_sentiment.include.app.tasks.prefilter_data import prefilter_from_db
 from core_sentiment.include.app.utils.pageviews_filtering_prompt import SYSTEM_PROMPT
 from pendulum import datetime
 
 logger = logging.getLogger(__name__)
-
-
-# @task()
-# def load_data_to_database(extract_info: dict):
-#     """Load extracted data into PostgreSQL."""
-#     try:
-#         logger.info("Starting load task…")
-
-#         csv_path = extract_info["csv_path"]
-#         source_file = extract_info["source_file"]
-
-#         # Load data
-#         rows_inserted = load_to_postgres(csv_path, source_file)
-
-#         logger.info(f"Data loaded: {rows_inserted} rows")
-
-#         return {
-#             "rows_inserted": rows_inserted,
-#             "source_file": source_file,
-#             "status": "success",
-#         }
-
-#     except DatabaseError as e:
-#         logger.error(f"Database load failed: {e}")
-#         raise
-#     except Exception as e:
-#         logger.error(f"Unexpected error in load: {e}")
-#         raise
 
 
 default_args = {
@@ -57,6 +33,7 @@ default_args = {
     "retries": 3,
     "retry_delay": timedelta(minutes=1),
     "execution_timeout": timedelta(hours=2),
+    "on_failure_callback": send_pipeline_failure,
 }
 
 
@@ -92,21 +69,24 @@ default_args = {
     - Microsoft
 
     ## Pipeline Steps
-    1. **Initialize Database**: Create schema and tables
-    2. **Download**: Fetch hourly Wikipedia pageview dump
-    3. **Extract**: Unzip the gzip pageviews file and extract all data
-    4. **Load Raw Data**: Store ALL raw pageviews in database (data warehouse)
-    5. **Pre-filter**: Create subset for LLM processing
-    6. **LLM Filter**: Use Ollama to filter genuine product/service pages
-    7. **Load Filtered Data**: Store filtered results in database
-    8. **Analyze**: Determine company with highest pageviews
-    9. **Cleanup**: Remove temporary files
+    1. **Initialize Database** (parallel with download/extract)
+    2. **Download & Extract**: Fetch and unzip Wikipedia pageview dump
+    3. **Load Raw Data**: Store ALL raw pageviews in database (data warehouse)
+    4. **Pre-filter**: Create subset for LLM processing
+    5. **LLM Filter**: Use Ollama to filter genuine product/service pages
+    6. **Load Filtered Data**: Store filtered results in database
+    7. **Analyze**: Determine company with highest pageviews
+    8. **Cleanup & Notify**: Remove temp files and send notifications
 
     ## Output
     Database Tables
     - `raw_pageviews`: All extracted pageviews (immutable, historical record)
-    - `filtered_pageviews`: LLM-filtered product/service pages only
-    - `company_pageview_summary`: Daily aggregated pageviews by company
+    - `filtered_pageviews`: LLM-filtered product/service pages with company classification
+    - `sentiment_results`: Sentiment analysis results (future enhancement)
+    
+    ## Monitoring
+    - Slack/Email notifications on success/failure
+    - Streamlit dashboard for sentiment visualization
     """,
 )
 def pageviews():
@@ -119,32 +99,6 @@ def pageviews():
             sql="ddl/tables.sql",
             conn_id="core_sentiment_db",
         )
-
-        create_classifier_function = SQLExecuteQueryOperator(
-            task_id="create_classifier_function",
-            sql="ddl/company_classifier_function.sql",
-            conn_id="core_sentiment_db",
-        )
-
-        create_overrides_table = SQLExecuteQueryOperator(
-            task_id="create_overrides_table",
-            sql="ddl/company_overrides_table.sql",
-            conn_id="core_sentiment_db",
-        )
-
-        create_classified_view = SQLExecuteQueryOperator(
-            task_id="create_classified_view",
-            sql="ddl/classified_pageviews_view.sql",
-            conn_id="core_sentiment_db",
-        )
-
-        # Schema creation order
-        (
-            create_raw_tables
-            >> create_classifier_function
-            >> create_overrides_table
-            >> create_classified_view
-        )  # type: ignore[unused-expression]
 
     # ================================================================================
     # ==================== EXTRACT & LOAD RAW TO WAREHOUSE PHASE =====================
@@ -232,13 +186,6 @@ def pageviews():
 
         load_filtered_task = load_filtered_data(filter_task)  # type: ignore[arg-type]
 
-        # Refresh materialized view
-        refresh_view = SQLExecuteQueryOperator(
-            task_id="refresh_classified_view",
-            sql="SELECT refresh_classified_pageviews();",
-            conn_id="core_sentiment_db",
-        )
-
         # Get company rankings
         get_rankings = SQLExecuteQueryOperator(
             task_id="get_company_rankings",
@@ -255,24 +202,34 @@ def pageviews():
             do_xcom_push=True,
         )
 
-        load_filtered_task >> refresh_view >> [get_rankings, get_winner]  # type: ignore[unused-expression]
+        load_filtered_task >> [get_rankings, get_winner]  # type: ignore[unused-expression]
 
-    # ========================================================
-    # ====================== CLEAN UP ========================
-    # ========================================================
+    # ================================================================================
+    # ====================== CLEAN UP && SUCCESS NOTIFICATION ========================
+    # ================================================================================
 
-    @task
-    def cleanup_temp(csv_path: str):
-        """Airflow Task: Remove temporary files after successful processing."""
-        return cleanup_temp_files(csv_path)
+    with TaskGroup("finalize", tooltip="Cleanup and notifications") as finalize:
 
-    cleanup_task = cleanup_temp(prefilter_task)  # type: ignore[arg-type]
+        @task
+        def cleanup_temp(csv_path: str):
+            """Remove temporary files after successful processing."""
+            return cleanup_temp_files(csv_path)
+
+        @task
+        def notify_success(**context):
+            """Send success notification."""
+            send_pipeline_success(**context)
+
+        cleanup_task = cleanup_temp(prefilter_task)  # type: ignore[arg-type]
+        notify_task = notify_success()
+
+        cleanup_task >> notify_task  # type: ignore[unused-expression]
 
     # ========================================================
     # ================ PIPELINE FLOW (ETL) ===================
     # ========================================================
 
-    db_setup >> extract_load >> transform >> analytics >> cleanup_task  # type: ignore[unused-expression]
+    [db_setup, extract_load] >> transform >> analytics >> finalize  # type: ignore[unused-expression]
 
 
 pageviews()

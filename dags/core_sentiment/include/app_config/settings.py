@@ -1,3 +1,5 @@
+from typing import List
+
 from dotenv import load_dotenv
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -17,6 +19,23 @@ class Settings(BaseSettings):
     OLLAMA_HOST: str
     OLLAMA_MODEL: str
     OLLAMA_TIMEOUT: int
+
+    # Email settings
+    ENABLE_EMAIL_ALERTS: bool = False
+    SMTP_HOST: str = ""
+    SMTP_PORT: int = 587
+    SMTP_USER: str = ""
+    SMTP_PASSWORD: str = ""
+    EMAIL_FROM: str = ""
+    EMAIL_TO: str = ""  # Comma-separated
+
+    # Slack settings
+    ENABLE_SLACK: bool = False
+    SLACK_WEBHOOK_URL: str = ""
+
+    @property
+    def email_to_list(self) -> List[str]:
+        return [e.strip() for e in self.EMAIL_TO.split(",") if e.strip()]
 
     # Configuration for how environment variables are loaded and handled
     model_config = SettingsConfigDict(

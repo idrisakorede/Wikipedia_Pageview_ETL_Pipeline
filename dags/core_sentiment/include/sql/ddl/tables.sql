@@ -3,7 +3,6 @@
 -- Purpose: Immutable storage of all extracted Wikipedia pageview data
 -- ===================================================================
 
--- Enable extensions (if needed)
 CREATE EXTENSION IF NOT EXISTS pg_trgm;  -- For fuzzy text search
 
 -- Raw pageviews: Complete historical record
@@ -28,14 +27,11 @@ CREATE INDEX IF NOT EXISTS idx_raw_views
     ON raw_pageviews(count_views DESC);
 
 CREATE INDEX IF NOT EXISTS idx_raw_page_title_pattern 
-    ON raw_pageviews USING gin(page_title gin_trgm_ops);  -- Trigram index for LIKE queries
+    ON raw_pageviews USING gin(page_title gin_trgm_ops);
 
--- Partitioning hint comment (implement if data volume grows)
 COMMENT ON TABLE raw_pageviews IS 
     'Warehouse table for all Wikipedia pageviews. 
-    Consider partitioning by processing_date when data exceeds 10M rows.
     Retention policy: 90 days recommended.';
-
 
 
 -- ===================================================================
@@ -48,70 +44,92 @@ CREATE TABLE IF NOT EXISTS filtered_pageviews (
     domain VARCHAR(255) NOT NULL,
     page_title TEXT NOT NULL,
     count_views INTEGER NOT NULL CHECK (count_views >= 0),
+    company VARCHAR(50) NOT NULL,  -- Added: company classification
     filtered_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     processing_date DATE NOT NULL,
     filter_method VARCHAR(100) NOT NULL,
-    filter_confidence NUMERIC(3,2), -- Optional: 0.00 to 1.00
     
-    CONSTRAINT unique_filtered_pageview UNIQUE (domain, page_title, processing_date, filter_method)
+    CONSTRAINT unique_filtered_pageview 
+        UNIQUE (domain, page_title, processing_date, filter_method)
 );
 
 CREATE INDEX IF NOT EXISTS idx_filtered_processing_date 
     ON filtered_pageviews(processing_date DESC);
 
-CREATE INDEX IF NOT EXISTS idx_filtered_page_title 
-    ON filtered_pageviews(page_title);
+CREATE INDEX IF NOT EXISTS idx_filtered_company 
+    ON filtered_pageviews(company);
 
 CREATE INDEX IF NOT EXISTS idx_filtered_views 
     ON filtered_pageviews(count_views DESC);
 
+CREATE INDEX IF NOT EXISTS idx_filtered_company_date 
+    ON filtered_pageviews(company, processing_date);
+
 COMMENT ON TABLE filtered_pageviews IS 
-    'Curated dataset of LLM-filtered product/service pages.
-    Used as source for company classification and analytics.';
-
-COMMENT ON COLUMN filtered_pageviews.filter_method IS 
-    'Identifier for filtering method (e.g., llm_ollama_llama3.2:1b)';
+    'Curated dataset of LLM-filtered pages with company classification.
+    This is the single source of truth for all analytics.';
 
 
 -- ===================================================================
--- ========== COMPANY PAGEVIEW SUMMARY (Analytics Layer) =============
--- =========== Purpose: Daily aggregated metrics by company ==========
+-- ================= SENTIMENT RESULTS TABLE =========================
+-- ======== Purpose: Store LLM sentiment analysis results ===========
 -- ===================================================================
 
-CREATE TABLE IF NOT EXISTS company_pageview_summary (
-    id SERIAL PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS sentiment_results (
+    id BIGSERIAL PRIMARY KEY,
+    page_title TEXT NOT NULL,
     company VARCHAR(50) NOT NULL,
-    page_count INTEGER NOT NULL CHECK (page_count > 0),
-    total_views BIGINT NOT NULL CHECK (total_views > 0),
-    avg_views NUMERIC(12,2) NOT NULL,
-    max_views INTEGER NOT NULL,
-    min_views INTEGER NOT NULL,
+    sentiment_label VARCHAR(20) NOT NULL,  -- positive, neutral, negative
+    sentiment_score NUMERIC(4,3),  -- -1.0 to 1.0
+    count_views INTEGER NOT NULL,
     processing_date DATE NOT NULL,
-    calculated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    analyzed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     
-    -- Business rule: One summary per company per day
-    CONSTRAINT unique_company_date UNIQUE (company, processing_date)
+    CONSTRAINT unique_sentiment_page_date 
+        UNIQUE (page_title, processing_date),
+    CONSTRAINT valid_sentiment_label 
+        CHECK (sentiment_label IN ('positive', 'neutral', 'negative'))
 );
 
-CREATE INDEX IF NOT EXISTS idx_summary_date 
-    ON company_pageview_summary(processing_date DESC);
+CREATE INDEX IF NOT EXISTS idx_sentiment_date 
+    ON sentiment_results(processing_date DESC);
 
-CREATE INDEX IF NOT EXISTS idx_summary_company 
-    ON company_pageview_summary(company);
+CREATE INDEX IF NOT EXISTS idx_sentiment_company 
+    ON sentiment_results(company);
 
-CREATE INDEX IF NOT EXISTS idx_summary_total_views 
-    ON company_pageview_summary(total_views DESC);
+CREATE INDEX IF NOT EXISTS idx_sentiment_label 
+    ON sentiment_results(sentiment_label);
 
-COMMENT ON TABLE company_pageview_summary IS 
-    'Daily aggregated analytics by tech company.
-    Powers dashboards and ranking reports.';
+COMMENT ON TABLE sentiment_results IS 
+    'LLM-generated sentiment analysis for filtered pageviews.
+    Used by Streamlit dashboard for sentiment visualization.';
 
 
--- ==========================================
--- DATA QUALITY METRICS VIEW
--- Purpose: Monitor pipeline health and data quality
--- ==========================================
+-- ===================================================================
+-- ==================== ANALYTICS VIEWS ==============================
+-- ========= Purpose: Pre-defined queries for dashboards =============
+-- ===================================================================
 
+-- Daily company summary (replaces company_pageview_summary table)
+CREATE OR REPLACE VIEW v_daily_company_summary AS
+SELECT 
+    company,
+    processing_date,
+    COUNT(*) as page_count,
+    SUM(count_views) as total_views,
+    ROUND(AVG(count_views), 2) as avg_views,
+    MAX(count_views) as max_views,
+    MIN(count_views) as min_views
+FROM filtered_pageviews
+GROUP BY company, processing_date
+ORDER BY processing_date DESC, total_views DESC;
+
+COMMENT ON VIEW v_daily_company_summary IS 
+    'Daily aggregated metrics by company. 
+    Computed on-the-fly from filtered_pageviews.';
+
+
+-- Data quality metrics
 CREATE OR REPLACE VIEW v_data_quality_metrics AS
 SELECT 
     processing_date,
@@ -137,4 +155,37 @@ GROUP BY processing_date
 ORDER BY processing_date DESC;
 
 COMMENT ON VIEW v_data_quality_metrics IS 
-    'Data quality KPIs: raw vs filtered counts, filter rate, processing times';
+    'Pipeline health KPIs for monitoring dashboard.';
+
+
+-- Top pages by company (last 7 days)
+CREATE OR REPLACE VIEW v_top_pages_by_company AS
+SELECT 
+    company,
+    page_title,
+    count_views,
+    processing_date,
+    ROW_NUMBER() OVER (PARTITION BY company ORDER BY count_views DESC) as rank
+FROM filtered_pageviews
+WHERE processing_date >= CURRENT_DATE - INTERVAL '7 days'
+ORDER BY company, rank;
+
+COMMENT ON VIEW v_top_pages_by_company IS 
+    'Top 10 pages per company for quick dashboard queries.';
+
+
+-- Sentiment distribution
+CREATE OR REPLACE VIEW v_sentiment_distribution AS
+SELECT 
+    company,
+    processing_date,
+    sentiment_label,
+    COUNT(*) as count,
+    ROUND(AVG(sentiment_score), 3) as avg_score,
+    SUM(count_views) as total_views
+FROM sentiment_results
+GROUP BY company, processing_date, sentiment_label
+ORDER BY processing_date DESC, company;
+
+COMMENT ON VIEW v_sentiment_distribution IS 
+    'Sentiment breakdown by company and date for dashboard charts.';
