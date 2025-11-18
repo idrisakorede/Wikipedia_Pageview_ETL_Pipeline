@@ -94,7 +94,7 @@ def pageviews():
     # ============== DATABASE INITIALIZATION =================
     # ========================================================
     with TaskGroup("database_setup", tooltip="Initialize database schema") as db_setup:
-        create_raw_tables = SQLExecuteQueryOperator(
+        create_raw_tables = SQLExecuteQueryOperator(  # noqa: F841
             task_id="create_raw_tables",
             sql="ddl/tables.sql",
             conn_id="core_sentiment_db",
