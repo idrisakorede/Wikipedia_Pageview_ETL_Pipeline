@@ -16,12 +16,13 @@ from core_sentiment.include.app.tasks.load_raw_data import (
     load_raw_pageviews_to_db,
     verify_load,
 )
-from core_sentiment.include.app.tasks.monitor import (
-    send_pipeline_failure,
-    send_pipeline_success,
-)
 from core_sentiment.include.app.tasks.prefilter_data import prefilter_from_db
 from core_sentiment.include.app.utils.pageviews_filtering_prompt import SYSTEM_PROMPT
+from core_sentiment.include.app_config.notifications import (
+    failure_slack,
+    success_email,
+    success_slack,
+)
 from pendulum import datetime
 
 logger = logging.getLogger(__name__)
@@ -33,7 +34,9 @@ default_args = {
     "retries": 3,
     "retry_delay": timedelta(minutes=1),
     "execution_timeout": timedelta(hours=2),
-    "on_failure_callback": send_pipeline_failure,
+    "on_failure_callback": failure_slack,
+    "email_on_failure": True,
+    "email_on_success": False,
 }
 
 
@@ -89,6 +92,8 @@ default_args = {
     - Streamlit dashboard for sentiment visualization
     """,
 )
+
+# type: ignore[misc]
 def pageviews():
     # ========================================================
     # ============== DATABASE INITIALIZATION =================
@@ -215,10 +220,12 @@ def pageviews():
             """Remove temporary files after successful processing."""
             return cleanup_temp_files(csv_path)
 
-        @task
+        @task(on_success_callback=success_slack)
         def notify_success(**context):
-            """Send success notification."""
-            send_pipeline_success(**context)
+            """Send success notifications."""
+            success_email(context)
+
+        notify_task = notify_success()
 
         cleanup_task = cleanup_temp(prefilter_task)  # type: ignore[arg-type]
         notify_task = notify_success()

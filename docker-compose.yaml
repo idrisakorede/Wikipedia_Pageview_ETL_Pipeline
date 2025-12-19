@@ -36,6 +36,16 @@ x-airflow-common:
     DB_USER: ${DB_USER}
     DB_PASSWORD: ${DB_PASSWORD}
 
+    # Email configuration
+    AIRFLOW__EMAIL__EMAIL_BACKEND: airflow.utils.email.send_email_smtp
+    AIRFLOW__SMTP__SMTP_HOST: smtp.gmail.com
+    AIRFLOW__SMTP__SMTP_STARTTLS: 'true'
+    AIRFLOW__SMTP__SMTP_SSL: 'false'
+    AIRFLOW__SMTP__SMTP_PORT: 587
+    AIRFLOW__SMTP__SMTP_MAIL_FROM: ${EMAIL_FROM}
+    AIRFLOW__SMTP__SMTP_USER: ${SMTP_USER}
+    AIRFLOW__SMTP__SMTP_PASSWORD: ${SMTP_PASSWORD}
+
     # Ollama AI Configuration
     AIRFLOW__AI__PROVIDER: ollama
     AIRFLOW__AI__OLLAMA__BASE_URL: http://ollama:11434/v1       # Airflow config

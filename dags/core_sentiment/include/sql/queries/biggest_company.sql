@@ -3,7 +3,8 @@ WITH company_totals AS (
         company,
         COUNT(*) as page_count,
         SUM(count_views) as total_views
-    FROM v_today_classified
+    FROM filtered_pageviews
+    WHERE processing_date = CURRENT_DATE  -- Today only
     GROUP BY company
 ),
 winner AS (
@@ -35,17 +36,3 @@ SELECT
 FROM winner w
 CROSS JOIN runner_up r
 WHERE w.rank = 1;
-
--- ==========================================
--- EXAMPLE OUTPUT
--- ==========================================
--- winner_company    | Apple
--- winner_page_count | 145
--- winner_total_views| 2,450,000
--- runner_up_company | Google
--- runner_up_views   | 2,100,000
--- lead_by_views     | 350,000
--- lead_percentage   | 16.67
--- grand_total_views | 8,500,000
--- winner_market_share| 28.82
--- report_date       | 2025-11-15

@@ -35,6 +35,7 @@ class Settings(BaseSettings):
 
     @property
     def email_to_list(self) -> List[str]:
+        """Split comma-separated emails into list."""
         return [e.strip() for e in self.EMAIL_TO.split(",") if e.strip()]
 
     # Configuration for how environment variables are loaded and handled
