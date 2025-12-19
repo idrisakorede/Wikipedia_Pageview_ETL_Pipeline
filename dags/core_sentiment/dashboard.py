@@ -3,19 +3,18 @@ Core Sentiment Dashboard - Streamlit App
 Shows pageview analytics and company rankings based on filtered_pageviews table.
 """
 
+import logging
 import os
 from datetime import datetime
-from typing import Any
 
 import pandas as pd
 import plotly.express as px
+import psycopg
 import streamlit as st
-from sqlalchemy import create_engine, text
 
-# ------------------------------------------------------
-# PAGE CONFIG
-# ------------------------------------------------------
+logger = logging.getLogger(__name__)
 
+# Page config
 st.set_page_config(
     page_title="Core Sentiment Dashboard",
     page_icon="📊",
@@ -33,58 +32,77 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-
-# ------------------------------------------------------
-# DATABASE ENGINE
-# ------------------------------------------------------
+# ========================================================
+# DATABASE CONNECTION
+# ========================================================
 
 
 @st.cache_resource
-def get_engine():
-    """Return SQLAlchemy engine for PostgreSQL."""
-    conn_string = (
-        f"postgresql+psycopg://{os.getenv('DB_USER', 'postgres')}:"
-        f"{os.getenv('DB_PASSWORD', 'postgres')}@"
-        f"core_sentiment_db:5432/{os.getenv('DB_NAME', 'core_sentiment')}"
-    )
+def get_connection():
+    """Create database connection using psycopg."""
+    db_name = os.getenv("DB_NAME", "core_sentiment")
+    db_user = os.getenv("DB_USER", "postgres")
+    db_password = os.getenv("DB_PASSWORD", "postgres")
+    db_host = "core_sentiment_db"
+    db_port = 5432
+
     try:
-        return create_engine(conn_string)
+        conn = psycopg.connect(
+            host=db_host,
+            port=db_port,
+            dbname=db_name,
+            user=db_user,
+            password=db_password,
+            connect_timeout=10,
+        )
+        return conn
     except Exception as e:
-        st.error(f"Database connection failed: {e}")
+        st.error(f"❌ Database connection failed: {e}")
+        st.info(f"Host: {db_host}, DB: {db_name}, User: {db_user}")
         st.stop()
 
 
-engine = get_engine()
-
-
-# ------------------------------------------------------
+# ========================================================
 # DATA LOADERS
-# ------------------------------------------------------
+# ========================================================
 
 
 @st.cache_data(ttl=300)
-def load_filtered_pageviews(days: int, companies: list[str] | None):
-    sql = """
-        SELECT domain, page_title, count_views, company,
-               processing_date, filtered_at, filter_method
+def load_filtered_pageviews(days=7, companies=None):
+    """Load filtered pageviews with company classification."""
+    conn = get_connection()
+
+    company_filter = ""
+    if companies and len(companies) > 0:
+        placeholders = ",".join(["%s"] * len(companies))
+        company_filter = f"AND company IN ({placeholders})"
+
+    query = f"""
+        SELECT 
+            domain,
+            page_title,
+            count_views,
+            company,
+            processing_date,
+            filtered_at,
+            filter_method
         FROM filtered_pageviews
-        WHERE processing_date >= CURRENT_DATE - INTERVAL :days
+        WHERE processing_date >= CURRENT_DATE - INTERVAL '{days} days'
+        {company_filter}
+        ORDER BY processing_date DESC, count_views DESC
     """
 
-    params: dict[str, Any] = {"days": f"{days} days"}
-
     if companies:
-        sql += " AND company = ANY(:companies)"
-        params["companies"] = tuple(companies)
-
-    sql += " ORDER BY processing_date DESC, count_views DESC"
-
-    return pd.read_sql(text(sql), engine, params=params)
+        return pd.read_sql(query, conn, params=companies)  # type: ignore
+    return pd.read_sql(query, conn)  # type: ignore
 
 
 @st.cache_data(ttl=300)
-def get_company_rankings(days: int, companies: list[str] | None):
-    sql = """
+def get_company_rankings(days=7, companies=None):
+    """Get company rankings."""
+    conn = get_connection()
+
+    query = f"""
         WITH daily_metrics AS (
             SELECT 
                 company,
@@ -95,7 +113,7 @@ def get_company_rankings(days: int, companies: list[str] | None):
                 MIN(count_views) as min_views,
                 PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY count_views) as median_views
             FROM filtered_pageviews
-            WHERE processing_date >= CURRENT_DATE - INTERVAL :days
+            WHERE processing_date >= CURRENT_DATE - INTERVAL '{days} days'
             GROUP BY company
         ),
         rankings AS (
@@ -105,38 +123,23 @@ def get_company_rankings(days: int, companies: list[str] | None):
                 ROUND(100.0 * total_views / SUM(total_views) OVER (), 2) as market_share_pct
             FROM daily_metrics
         )
-        SELECT *
-        FROM rankings
-    """
-
-    params = {"days": f"{days} days"}
-
-    df = pd.read_sql(text(sql), engine, params=params)
-
-    if companies:
-        df = df[df["company"].isin(companies)]
-
-    return df.sort_values("rank")
-
-
-@st.cache_data(ttl=300)
-def get_daily_trends(days: int, companies: list[str] | None):
-    sql = """
         SELECT 
-            processing_date,
+            rank,
             company,
-            COUNT(*) as page_count,
-            SUM(count_views) as total_views
-        FROM filtered_pageviews
-        WHERE processing_date >= CURRENT_DATE - INTERVAL :days
-        GROUP BY processing_date, company
-        ORDER BY processing_date, company
+            page_count,
+            total_views,
+            avg_views,
+            median_views,
+            max_views,
+            min_views,
+            market_share_pct
+        FROM rankings
+        ORDER BY rank
     """
 
-    params = {"days": f"{days} days"}
+    df = pd.read_sql(query, conn)  # type: ignore
 
-    df = pd.read_sql(text(sql), engine, params=params)
-
+    # Filter by companies if specified
     if companies:
         df = df[df["company"].isin(companies)]
 
@@ -144,33 +147,69 @@ def get_daily_trends(days: int, companies: list[str] | None):
 
 
 @st.cache_data(ttl=300)
+def get_daily_trends(days=7, companies=None):
+    """Get daily view trends by company."""
+    conn = get_connection()
+
+    company_filter = ""
+    if companies and len(companies) > 0:
+        placeholders = ",".join(["%s"] * len(companies))
+        company_filter = f"AND company IN ({placeholders})"
+
+    query = f"""
+        SELECT 
+            processing_date,
+            company,
+            COUNT(*) as page_count,
+            SUM(count_views) as total_views
+        FROM filtered_pageviews
+        WHERE processing_date >= CURRENT_DATE - INTERVAL '{days} days'
+        {company_filter}
+        GROUP BY processing_date, company
+        ORDER BY processing_date, company
+    """
+
+    if companies:
+        return pd.read_sql(query, conn, params=companies)  # type: ignore
+    return pd.read_sql(query, conn)  # type: ignore
+
+
+@st.cache_data(ttl=300)
 def get_data_quality():
-    sql = """
-        SELECT *
-        FROM v_data_quality_metrics
+    """Get data quality metrics."""
+    conn = get_connection()
+    query = """
+        SELECT * FROM v_data_quality_metrics
         ORDER BY processing_date DESC
         LIMIT 30
     """
     try:
-        return pd.read_sql(text(sql), engine)
-    except Exception:
+        return pd.read_sql(query, conn)  # type: ignore
+    except Exception as e:
+        logger.warning(f"Could not load data quality metrics: {e}")
         return pd.DataFrame()
 
 
 @st.cache_data(ttl=300)
-def get_winner_analysis(days: int):
-    sql = """
+def get_winner_analysis(days=7):
+    """Get winner vs runner-up analysis."""
+    conn = get_connection()
+
+    query = f"""
         WITH company_totals AS (
             SELECT 
                 company,
                 COUNT(*) as page_count,
                 SUM(count_views) as total_views
             FROM filtered_pageviews
-            WHERE processing_date >= CURRENT_DATE - INTERVAL :days
+            WHERE processing_date >= CURRENT_DATE - INTERVAL '{days} days'
             GROUP BY company
         ),
         winner AS (
-            SELECT *,
+            SELECT 
+                company,
+                page_count,
+                total_views,
                 RANK() OVER (ORDER BY total_views DESC) as rank
             FROM company_totals
         ),
@@ -188,25 +227,26 @@ def get_winner_analysis(days: int):
             r.runner_up_company,
             r.runner_up_views,
             w.total_views - r.runner_up_views as lead_by_views,
-            ROUND(100.0 * (w.total_views - r.runner_up_views) / r.runner_up_views, 2) as lead_percentage,
+            ROUND(100.0 * (w.total_views - r.runner_up_views) / NULLIF(r.runner_up_views, 0), 2) as lead_percentage,
             (SELECT SUM(total_views) FROM company_totals) as grand_total_views,
-            ROUND(100.0 * w.total_views / (SELECT SUM(total_views) FROM company_totals), 2) as winner_market_share
+            ROUND(100.0 * w.total_views / NULLIF((SELECT SUM(total_views) FROM company_totals), 0), 2) as winner_market_share
         FROM winner w
         CROSS JOIN runner_up r
         WHERE w.rank = 1
     """
-
-    params = {"days": f"{days} days"}
-
     try:
-        return pd.read_sql(text(sql), engine, params=params).iloc[0]
-    except Exception:
+        df = pd.read_sql(query, conn)  # type: ignore
+        if not df.empty:
+            return df.iloc[0]
+        return None
+    except (psycopg.Error, IndexError) as e:
+        logger.error(f"Error fetching winner analysis: {e}")
         return None
 
 
-# ------------------------------------------------------
-# SIDEBAR
-# ------------------------------------------------------
+# ========================================================
+# HEADER & SIDEBAR
+# ========================================================
 
 st.title("📊 Core Sentiment Analytics Dashboard")
 st.markdown("*Real-time Wikipedia pageview analytics for tech companies*")
@@ -226,10 +266,9 @@ if st.sidebar.button("🔄 Refresh Data"):
 st.sidebar.markdown("---")
 st.sidebar.caption(f"📡 Connected to: `{os.getenv('DB_NAME', 'core_sentiment')}`")
 
-
-# ------------------------------------------------------
+# ========================================================
 # LOAD DATA
-# ------------------------------------------------------
+# ========================================================
 
 with st.spinner("⏳ Loading data..."):
     try:
@@ -247,10 +286,9 @@ if df.empty:
     st.info("💡 Try running your Airflow pipeline to generate data")
     st.stop()
 
-
-# ------------------------------------------------------
+# ========================================================
 # WINNER SPOTLIGHT
-# ------------------------------------------------------
+# ========================================================
 
 if winner_data is not None:
     st.subheader("🏆 Market Leader Analysis")
@@ -280,10 +318,9 @@ if winner_data is not None:
 
 st.markdown("---")
 
-
-# ------------------------------------------------------
+# ========================================================
 # KEY METRICS
-# ------------------------------------------------------
+# ========================================================
 
 st.subheader("📈 Overview Metrics")
 col1, col2, col3, col4 = st.columns(4)
@@ -295,10 +332,9 @@ col4.metric("🏢 Companies", df["company"].nunique())
 
 st.markdown("---")
 
-
-# ------------------------------------------------------
+# ========================================================
 # COMPANY RANKINGS
-# ------------------------------------------------------
+# ========================================================
 
 st.subheader("🏅 Company Rankings")
 
@@ -332,16 +368,23 @@ if not rankings_df.empty:
             values="total_views",
             names="company",
             title="Market Share by Views",
+            color="company",
+            color_discrete_map={
+                "Amazon": "#FF9900",
+                "Apple": "#A2AAAD",
+                "Google": "#4285F4",
+                "Microsoft": "#00A4EF",
+                "Meta": "#0668E1",
+            },
         )
         fig_pie.update_traces(textposition="inside", textinfo="percent+label")
         st.plotly_chart(fig_pie, use_container_width=True)
 
 st.markdown("---")
 
-
-# ------------------------------------------------------
-# DAILY TRENDS
-# ------------------------------------------------------
+# ========================================================
+# TRENDS OVER TIME
+# ========================================================
 
 st.subheader("📅 Daily Trends")
 
@@ -353,25 +396,34 @@ if not trends_df.empty:
         color="company",
         title=f"Daily Total Views by Company (Last {days} Days)",
         markers=True,
+        color_discrete_map={
+            "Amazon": "#FF9900",
+            "Apple": "#A2AAAD",
+            "Google": "#4285F4",
+            "Microsoft": "#00A4EF",
+            "Meta": "#0668E1",
+        },
+    )
+    fig_trend.update_layout(
+        xaxis_title="Date", yaxis_title="Total Views", hovermode="x unified", height=400
     )
     st.plotly_chart(fig_trend, use_container_width=True)
 
 st.markdown("---")
 
-
-# ------------------------------------------------------
-# TOP PAGES
-# ------------------------------------------------------
+# ========================================================
+# TOP PAGES BY COMPANY
+# ========================================================
 
 st.subheader("🔝 Top Pages by Company")
 
 tabs = st.tabs(["🟠 Amazon", "⚪ Apple", "🔵 Google", "🔷 Microsoft", "🟦 Meta"])
-for tab, company in zip(tabs, all_companies):
+
+for tab, company in zip(tabs, ["Amazon", "Apple", "Google", "Microsoft", "Meta"]):
     with tab:
         company_data = df[df["company"] == company].nlargest(15, "count_views")
-        if company_data.empty:
-            st.info(f"ℹ️ No data available for {company}")
-        else:
+
+        if not company_data.empty:
             st.dataframe(
                 company_data[
                     ["page_title", "count_views", "processing_date"]
@@ -380,13 +432,14 @@ for tab, company in zip(tabs, all_companies):
                 use_container_width=True,
                 height=400,
             )
+        else:
+            st.info(f"ℹ️ No data available for {company} in the selected period")
 
 st.markdown("---")
 
-
-# ------------------------------------------------------
+# ========================================================
 # DATA QUALITY
-# ------------------------------------------------------
+# ========================================================
 
 if not quality_df.empty:
     st.subheader("🔍 Data Quality Metrics")
@@ -402,7 +455,9 @@ if not quality_df.empty:
                     "filtered_records",
                     "filter_rate_pct",
                 ]
-            ].style.format(
+            ]
+            .head(10)
+            .style.format(
                 {
                     "raw_records": "{:,.0f}",
                     "filtered_records": "{:,.0f}",
@@ -419,19 +474,21 @@ if not quality_df.empty:
             x="processing_date",
             y=["raw_records", "filtered_records"],
             title="Raw vs Filtered Records",
+            barmode="group",
+            color_discrete_sequence=["#636EFA", "#00CC96"],
         )
         st.plotly_chart(fig_quality, use_container_width=True)
 
-st.markdown("---")
+    st.markdown("---")
 
-
-# ------------------------------------------------------
+# ========================================================
 # DATA EXPLORER
-# ------------------------------------------------------
+# ========================================================
 
 with st.expander("🔎 Detailed Data Explorer"):
-    search = st.text_input("🔍 Search page titles", "")
+    st.subheader("Search & Filter")
 
+    search = st.text_input("🔍 Search page titles", "")
     filtered_table = (
         df[df["page_title"].str.contains(search, case=False, na=False)]
         if search
@@ -449,20 +506,20 @@ with st.expander("🔎 Detailed Data Explorer"):
 
     csv = filtered_table.to_csv(index=False)
     st.download_button(
-        "📥 Download CSV",
-        csv,
+        label="📥 Download as CSV",
+        data=csv,
         file_name=f"core_sentiment_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
         mime="text/csv",
     )
 
-
-# ------------------------------------------------------
+# ========================================================
 # FOOTER
-# ------------------------------------------------------
+# ========================================================
 
 st.markdown("---")
-
 col1, col2, col3 = st.columns(3)
+
 col1.caption(f"📅 Data Period: Last {days} days")
 col2.caption(f"🔄 Last Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-col3.caption(f"🎯 Filter Method: {df['filter_method'].iloc[0]}")
+if not df.empty:
+    col3.caption(f"🎯 Filter Method: {df['filter_method'].iloc[0]}")
